@@ -23,6 +23,4 @@ DefinitionBlock(
 		#include <northbridge/intel/grantley/acpi/hostbridge.asl>
 		#include <southbridge/intel/lynxpoint/acpi/pch.asl>
 	}
-
-	#include "acpi/thermal.asl"
 }
