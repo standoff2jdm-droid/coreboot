@@ -68,26 +68,38 @@ void intel_acpi_gen_def_acpi_pirq(const struct device *lpc)
 	for (struct device *dev = pcidev_on_root(0, 0); dev; dev = dev->sibling) {
 		const u8 pci_dev = PCI_SLOT(dev->path.pci.devfn);
 		const u8 int_pin = pci_read_config8(dev, PCI_INTERRUPT_PIN);
+		u8 first = int_pin, last = int_pin;
 
 		if (int_pin < PCI_INT_A || int_pin > PCI_INT_D)
 			continue;
 
-		if (is_slot_pin_assigned(pin_irq_map, map_count, pci_dev, int_pin))
-			continue;
+		/*
+		 * Interrupts from behind a bridge are swizzled onto any of the
+		 * four pins of the bridge's slot, not only the bridge's own pin.
+		 */
+		if ((dev->hdr_type & 0x7f) == PCI_HEADER_TYPE_BRIDGE) {
+			first = PCI_INT_A;
+			last = PCI_INT_D;
+		}
 
-		enum pirq pirq = map_pirq(dev, int_pin);
-		if (pirq == PIRQ_INVALID)
-			continue;
+		for (u8 pin = first; pin <= last; pin++) {
+			if (is_slot_pin_assigned(pin_irq_map, map_count, pci_dev, pin))
+				continue;
 
-		pin_irq_map[map_count].slot = pci_dev;
-		pin_irq_map[map_count].pin = (enum pci_pin)int_pin;
-		pin_irq_map[map_count].pic_pirq = pirq;
-		/* PIRQs are mapped to GSIs starting at 16 */
-		pin_irq_map[map_count].apic_gsi = 16 + pirq_idx(pirq);
-		printk(BIOS_SPEW, "ACPI_PIRQ_GEN: %s: pin=%d pirq=%zd\n",
-		       dev_path(dev), int_pin - PCI_INT_A,
-		       pirq_idx(pin_irq_map[map_count].pic_pirq));
-		map_count++;
+			enum pirq pirq = map_pirq(dev, pin);
+			if (pirq == PIRQ_INVALID)
+				continue;
+
+			pin_irq_map[map_count].slot = pci_dev;
+			pin_irq_map[map_count].pin = (enum pci_pin)pin;
+			pin_irq_map[map_count].pic_pirq = pirq;
+			/* PIRQs are mapped to GSIs starting at 16 */
+			pin_irq_map[map_count].apic_gsi = 16 + pirq_idx(pirq);
+			printk(BIOS_SPEW, "ACPI_PIRQ_GEN: %s: pin=%d pirq=%zd\n",
+			       dev_path(dev), pin - PCI_INT_A,
+			       pirq_idx(pin_irq_map[map_count].pic_pirq));
+			map_count++;
+		}
 	}
 
 	intel_write_pci_PRT("\\_SB.PCI0", pin_irq_map, map_count, &pirq_map);
