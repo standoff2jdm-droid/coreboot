@@ -302,7 +302,8 @@ static void southbridge_smi_store(void)
 	const pci_devfn_t lpc_dev = PCI_DEV(0, 0x1f, 0);
 	const bool wp_enabled = !(pci_read_config16(lpc_dev, BIOS_CNTL) & BIOS_CNTL_BIOSWE);
 	if (wp_enabled) {
-		set_insmm_sts(true);
+		if (CONFIG(HAVE_INSMM_STS))
+			set_insmm_sts(true);
 		pci_or_config16(lpc_dev, BIOS_CNTL, BIOS_CNTL_BIOSWE);
 	}
 	/* drivers/smmstore/smi.c */
@@ -311,7 +312,8 @@ static void southbridge_smi_store(void)
 
 	if (wp_enabled) {
 		pci_and_config16(lpc_dev, BIOS_CNTL, ~BIOS_CNTL_BIOSWE);
-		set_insmm_sts(false);
+		if (CONFIG(HAVE_INSMM_STS))
+			set_insmm_sts(false);
 	}
 }
 
