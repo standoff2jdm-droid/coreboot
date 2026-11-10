@@ -54,28 +54,33 @@ struct grantley_hob_node {
 	uint8_t address_decode[564];
 } __packed;
 
+/*
+ * Only the head of the HOB is shared between initializer builds; the global
+ * fields after the node array move with the build and are located through
+ * the payload size instead.
+ */
 struct grantley_dimm_hob {
 	uint8_t version;
 	uint8_t entries;
 	uint8_t elements[288];
 	struct grantley_hob_node node[8];
-	uint8_t configuration[2069];
-	uint16_t frequency_index;
-	uint16_t vmse_frequency;
-	uint8_t mode;
-	uint8_t sad_count;
-	uint8_t ecc_enabled;
 } __packed;
+
+static const struct {
+	size_t size;
+	size_t ecc_offset;
+} hob_layouts[] = {
+	{ 19276, 19173 },
+	{ 19335, 19193 },
+};
 
 _Static_assert(sizeof(struct grantley_hob_dimm) == 48, "DIMM HOB layout");
 _Static_assert(sizeof(struct grantley_hob_channel) == 377, "Channel HOB layout");
 _Static_assert(sizeof(struct grantley_hob_node) == 2101, "Node HOB layout");
 _Static_assert(offsetof(struct grantley_dimm_hob, node) == 290, "Node HOB offset");
-_Static_assert(offsetof(struct grantley_dimm_hob, ecc_enabled) == 19173,
-	       "ECC HOB offset");
 
 static const struct grantley_dimm_hob *find_dimm_hob(
-	const struct grantley_uncore_state *state)
+	const struct grantley_uncore_state *state, size_t *ecc_offset)
 {
 	static const EFI_GUID guid = {
 		0xf8870015, 0x6994, 0x4b98,
@@ -104,11 +109,20 @@ static const struct grantley_dimm_hob *find_dimm_hob(
 		if (hob->HobType == EFI_HOB_TYPE_GUID_EXTENSION &&
 		    length >= sizeof(EFI_HOB_GUID_TYPE) &&
 		    !memcmp(&((const EFI_HOB_GUID_TYPE *)hob)->Name, &guid, sizeof(guid))) {
-			/* The payload is 19276 bytes, with up to four padding bytes. */
+			/* The payload is followed by up to seven padding bytes. */
 			size_t size = length - sizeof(EFI_HOB_GUID_TYPE);
+			size_t i;
 
-			if (result || size < 19276 || size > ALIGN_UP(19276, 8))
+			if (result)
 				return NULL;
+			for (i = 0; i < ARRAY_SIZE(hob_layouts); i++) {
+				if (size >= hob_layouts[i].size &&
+				    size <= ALIGN_UP(hob_layouts[i].size, 8))
+					break;
+			}
+			if (i == ARRAY_SIZE(hob_layouts))
+				return NULL;
+			*ecc_offset = hob_layouts[i].ecc_offset;
 			result = (const void *)(p + sizeof(EFI_HOB_GUID_TYPE));
 			if (result->version != 1)
 				return NULL;
@@ -142,7 +156,8 @@ static uint16_t voltage_mv(uint8_t voltage)
 
 void grantley_save_dimm_info(const struct grantley_uncore_state *state)
 {
-	const struct grantley_dimm_hob *hob = find_dimm_hob(state);
+	size_t ecc_offset = 0;
+	const struct grantley_dimm_hob *hob = find_dimm_hob(state, &ecc_offset);
 	unsigned int count = 0;
 
 	if (!hob) {
@@ -190,7 +205,8 @@ void grantley_save_dimm_info(const struct grantley_uncore_state *state)
 		return;
 	}
 	memset(info, 0, sizeof(*info));
-	info->ecc_type = hob->ecc_enabled ? MEMORY_ARRAY_ECC_MULTI_BIT : MEMORY_ARRAY_ECC_NONE;
+	info->ecc_type = ((const uint8_t *)hob)[ecc_offset] ?
+		MEMORY_ARRAY_ECC_MULTI_BIT : MEMORY_ARRAY_ECC_NONE;
 	for (size_t n = 0; n < ARRAY_SIZE(hob->node); n++) {
 		const struct grantley_hob_node *node = &hob->node[n];
 
