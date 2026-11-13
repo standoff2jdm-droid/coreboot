@@ -1,0 +1,351 @@
+name: Machinist X99-B9 Coreboot CI/CD Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - x99-*
+      - b9-*
+      - machinist-*
+      - '**/x99**'
+    paths:
+      - 'src/**'
+      - 'util/**'
+      - 'payloads/**'
+      - '.github/workflows/build-b9.yml'
+      - 'Makefile*'
+      - 'Kconfig*'
+  pull_request:
+    branches:
+      - main
+      - master
+      - x99-*
+      - machinist-*
+  workflow_dispatch:
+    inputs:
+      blobs_repo:
+        description: 'Git URL for coreboot binary blobs repository'
+        required: true
+        default: 'https://github.com/MrArtemSid/coreboot_blobs.git'
+      blobs_branch:
+        description: 'Branch for coreboot binary blobs'
+        required: true
+        default: 'x99-upstream-grouped'
+      custom_patch:
+        description: 'Optional patch file path or URL to apply before build'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build-matrix:
+    name: Build (${{ matrix.payload-name }} - ${{ matrix.debug-name }})
+    runs-on: ubuntu-latest
+    container:
+      image: coreboot/coreboot-sdk:latest
+      options: --user root
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Matrix 1: EDK2 (UefiPayloadPkg) with COM1 115200 Debug Console
+          - payload: edk2
+            debug: debug
+            payload-name: 'EDK2-UEFI'
+            debug-name: 'Debug-115200'
+            rom-desc: 'EDK2 UefiPayloadPkg with COM1 (0x3f8) 115200 baud serial debug console'
+
+          # Matrix 2: EDK2 (UefiPayloadPkg) Release (NoDebug)
+          - payload: edk2
+            debug: nodebug
+            payload-name: 'EDK2-UEFI'
+            debug-name: 'Release-NoDebug'
+            rom-desc: 'EDK2 UefiPayloadPkg release build (quiet console)'
+
+          # Matrix 3: SeaBIOS with COM1 115200 Debug Console
+          - payload: seabios
+            debug: debug
+            payload-name: 'SeaBIOS'
+            debug-name: 'Debug-115200'
+            rom-desc: 'SeaBIOS payload with COM1 (0x3f8) 115200 baud serial debug console'
+
+          # Matrix 4: SeaBIOS Release (NoDebug)
+          - payload: seabios
+            debug: nodebug
+            payload-name: 'SeaBIOS'
+            debug-name: 'Release-NoDebug'
+            rom-desc: 'SeaBIOS payload release build (quiet console)'
+
+    steps:
+      - name: Configure Git Safe Directory & Environment
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
+          echo "/opt/xgcc/bin" >> $GITHUB_PATH
+
+      - name: Checkout coreboot Source Tree
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify Environment and Compilers
+        run: |
+          echo "=== Build Host Environment ==="
+          uname -a
+          cat /etc/os-release | grep PRETTY_NAME || true
+          echo "=== Compiler Versions ==="
+          gcc --version | head -n 1
+          make --version | head -n 1
+          nasm -v || true
+          iasl -v 2>&1 | head -n 2 || true
+          if [ -d "/opt/xgcc/bin" ]; then
+            echo "coreboot-sdk cross-compilers detected:"
+            ls -la /opt/xgcc/bin/i386* || true
+          fi
+
+      - name: Setup Blobs (Grantley / Wellsburg Inputs)
+        run: |
+          BLOBS_URL="${{ inputs.blobs_repo || 'https://github.com/MrArtemSid/coreboot_blobs.git' }}"
+          BLOBS_BRANCH="${{ inputs.blobs_branch || 'x99-upstream-grouped' }}"
+          echo "Cloning blobs from ${BLOBS_URL} (branch: ${BLOBS_BRANCH})..."
+          
+          rm -rf 3rdparty/blobs
+          git clone --depth 1 -b "${BLOBS_BRANCH}" "${BLOBS_URL}" 3rdparty/blobs || {
+            echo "Falling back to default clone without branch..."
+            git clone --depth 1 "${BLOBS_URL}" 3rdparty/blobs
+          }
+          
+          # Ensure target mainboard directory exists
+          TARGET_BLOB_DIR="3rdparty/blobs/mainboard/machinist/x99-b9"
+          mkdir -p "${TARGET_BLOB_DIR}"
+          
+          # If Machinist X99-B9 specific uncore.bin is missing, reuse from D4M4 or QD4 as documented
+          if [ ! -f "${TARGET_BLOB_DIR}/uncore.bin" ]; then
+            echo "Checking fallback source for uncore.bin..."
+            for cand in \
+              "3rdparty/blobs/mainboard/machinist/x99-d4m4" \
+              "3rdparty/blobs/mainboard/machinist/x99_d4m4" \
+              "3rdparty/blobs/mainboard/huananzhi/x99-qd4" \
+              "3rdparty/blobs/mainboard/huananzhi/x99_qd4" \
+              3rdparty/blobs/mainboard/*/*; do
+              if [ -f "${cand}/uncore.bin" ]; then
+                echo "Found uncore.bin in ${cand}, linking to ${TARGET_BLOB_DIR}..."
+                cp -fv "${cand}/uncore.bin" "${TARGET_BLOB_DIR}/uncore.bin"
+                if [ -f "${cand}/intelsetup.bin" ]; then
+                  cp -fv "${cand}/intelsetup.bin" "${TARGET_BLOB_DIR}/intelsetup.bin"
+                fi
+                break
+              fi
+            done
+          fi
+          
+          ls -la "${TARGET_BLOB_DIR}"
+
+      - name: Fetch Required Git Submodules
+        run: |
+          echo "Fetching submodules for coreboot..."
+          git submodule update --init --checkout 3rdparty/vboot || true
+          
+          if [ "${{ matrix.payload }}" = "edk2" ]; then
+            echo "Initializing EDK2 payload submodules..."
+            git submodule update --init --checkout 3rdparty/ffs || true
+            git submodule update --init --checkout payloads/external/EDK2/edk2 || true
+          fi
+          
+          if [ "${{ matrix.payload }}" = "seabios" ]; then
+            echo "Initializing SeaBIOS payload submodules..."
+            git submodule update --init --checkout payloads/external/SeaBIOS/seabios || true
+          fi
+
+      - name: Apply Optional Custom Patches
+        if: "${{ inputs.custom_patch != '' }}"
+        run: |
+          PATCH_INPUT="${{ inputs.custom_patch }}"
+          echo "Applying patch: ${PATCH_INPUT}"
+          if [[ "${PATCH_INPUT}" =~ ^https?:// ]]; then
+            curl -fsSL "${PATCH_INPUT}" -o /tmp/custom.patch
+            git apply --verbose /tmp/custom.patch
+          elif [ -f "${PATCH_INPUT}" ]; then
+            git apply --verbose "${PATCH_INPUT}"
+          else
+            echo "Warning: patch ${PATCH_INPUT} not found or invalid!"
+          fi
+
+      - name: Generate coreboot Configuration (.config)
+        run: |
+          echo "Generating defconfig for Machinist X99-B9 [${{ matrix.payload }} - ${{ matrix.debug }}]..."
+          
+          cat << 'EOF' > .config.base
+          # Target Board Configuration
+          CONFIG_VENDOR_MACHINIST=y
+          CONFIG_BOARD_MACHINIST_X99_B9=y
+          CONFIG_MAINBOARD_DIR="machinist/x99-b9"
+          CONFIG_MAINBOARD_PART_NUMBER="X99 B9"
+          
+          # Architecture & Chipset
+          CONFIG_NORTHBRIDGE_INTEL_GRANTLEY=y
+          CONFIG_SOUTHBRIDGE_INTEL_LYNXPOINT=y
+          CONFIG_SUPERIO_NUVOTON_COMMON_PRE_RAM=y
+          CONFIG_SUPERIO_NUVOTON_COMMON_COM_A=y
+          CONFIG_SUPERIO_NUVOTON_NCT5539D=y
+          CONFIG_SERIRQ_CONTINUOUS_MODE=y
+          CONFIG_BOARD_ROMSIZE_KB_16384=y
+          CONFIG_AZALIA_USE_LEGACY_VERB_TABLE=y
+          CONFIG_HAVE_ACPI_TABLES=y
+          CONFIG_MEMORY_MAPPED_TPM=y
+          CONFIG_WELLSBURG_DISABLE_SSATA=y
+          
+          # Intel Grantley Uncore PEIM Initialization
+          CONFIG_HAVE_INTEL_UNCORE_BIN=y
+          CONFIG_INTEL_UNCORE_BIN_FILE="3rdparty/blobs/mainboard/machinist/x99-b9/uncore.bin"
+          CONFIG_GRANTLEY_INTELSETUP_FILE="3rdparty/blobs/mainboard/machinist/x99-b9/intelsetup.bin"
+          CONFIG_GRANTLEY_INTELSETUP_SERIAL_LEVEL_OFFSET=0x2d6
+          
+          # Generic Features
+          CONFIG_CBFS_SIZE=0x800000
+          CONFIG_COMPRESS_RAMSTAGE_LZMA=y
+          CONFIG_COMPRESS_PRERAM_STAGES_LZMA=y
+          CONFIG_COMPRESS_BOOTBLOCK_NONE=y
+          CONFIG_COLLECT_TIMESTAMPS=y
+          EOF
+          
+          # Debug vs NoDebug matrix branch
+          if [ "${{ matrix.debug }}" = "debug" ]; then
+            cat << 'EOF' >> .config.base
+          # Serial Debug Console (COM1 @ 0x3f8, 115200 8N1)
+          CONFIG_CONSOLE_SERIAL=y
+          CONFIG_TTYS0_BASE=0x3f8
+          CONFIG_CONSOLE_SERIAL_115200=y
+          CONFIG_TTYS0_BAUD_115200=y
+          CONFIG_DEFAULT_CONSOLE_LOGLEVEL_8=y
+          CONFIG_DEFAULT_CONSOLE_LOGLEVEL=8
+          CONFIG_BOOTBLOCK_CONSOLE=y
+          CONFIG_POSTCAR_CONSOLE=y
+          CONFIG_GRANTLEY_UNCORE_RC_SERIAL=y
+          CONFIG_DEBUG_CBFS=y
+          CONFIG_DEBUG_SMI=y
+          CONFIG_DEBUG_TPM=y
+          EOF
+          else
+            cat << 'EOF' >> .config.base
+          # NoDebug / Silent Console Configuration
+          # CONFIG_CONSOLE_SERIAL is not set
+          CONFIG_DEFAULT_CONSOLE_LOGLEVEL_4=y
+          CONFIG_DEFAULT_CONSOLE_LOGLEVEL=4
+          CONFIG_GRANTLEY_UNCORE_RC_SERIAL=n
+          # CONFIG_DEBUG_CBFS is not set
+          # CONFIG_DEBUG_SMI is not set
+          EOF
+          fi
+          
+          # Payload matrix branch
+          if [ "${{ matrix.payload }}" = "edk2" ]; then
+            cat << 'EOF' >> .config.base
+          # Payload: EDK2 (UefiPayloadPkg)
+          CONFIG_PAYLOAD_EDK2=y
+          CONFIG_EDK2_BOOTLOADER_PAYLOAD=y
+          CONFIG_EDK2_REPO_MRCHROMEBOX=y
+          EOF
+            if [ "${{ matrix.debug }}" = "debug" ]; then
+              cat << 'EOF' >> .config.base
+          CONFIG_EDK2_DEBUG=y
+          CONFIG_EDK2_SERIAL_SUPPORT=y
+          CONFIG_EDK2_SERIAL_BAUD_RATE=115200
+          EOF
+            else
+              cat << 'EOF' >> .config.base
+          CONFIG_EDK2_RELEASE=y
+          CONFIG_EDK2_SERIAL_SUPPORT=n
+          EOF
+            fi
+          elif [ "${{ matrix.payload }}" = "seabios" ]; then
+            cat << 'EOF' >> .config.base
+          # Payload: SeaBIOS
+          CONFIG_PAYLOAD_SEABIOS=y
+          CONFIG_SEABIOS_STABLE=y
+          EOF
+            if [ "${{ matrix.debug }}" = "debug" ]; then
+              cat << 'EOF' >> .config.base
+          CONFIG_SEABIOS_DEBUG_LEVEL=8
+          EOF
+            else
+              cat << 'EOF' >> .config.base
+          CONFIG_SEABIOS_DEBUG_LEVEL=0
+          EOF
+            fi
+          fi
+          
+          cp .config.base .config
+          make olddefconfig
+          
+          echo "=== Generated .config Summary ==="
+          grep -E "CONFIG_(VENDOR|BOARD|MAINBOARD|PAYLOAD|CONSOLE_SERIAL|DEFAULT_CONSOLE_LOGLEVEL|EDK2|SEABIOS)" .config || true
+
+      - name: Build coreboot ROM
+        run: |
+          echo "Building coreboot for Machinist X99-B9 [${{ matrix.payload }} - ${{ matrix.debug }}]..."
+          CPUS=$(nproc 2>/dev/null || echo 4)
+          make -j"${CPUS}" CPUS="${CPUS}"
+          
+          if [ ! -f "build/coreboot.rom" ]; then
+            echo "Error: build/coreboot.rom not generated!"
+            exit 1
+          fi
+
+      - name: Inspect and Package Firmware Artifacts
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "snapshot")
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '_')
+          ARTIFACT_DIR="artifacts_${SAFE_BRANCH}_${{ matrix.payload }}_${{ matrix.debug }}"
+          mkdir -p "${ARTIFACT_DIR}"
+          
+          TARGET_ROM_NAME="coreboot_machinist_x99-b9_${SAFE_BRANCH}_${{ matrix.payload }}_${{ matrix.debug }}_${SHORT_SHA}.rom"
+          cp "build/coreboot.rom" "${ARTIFACT_DIR}/${TARGET_ROM_NAME}"
+          cp ".config" "${ARTIFACT_DIR}/config_${{ matrix.payload }}_${{ matrix.debug }}.txt"
+          
+          # Inspect CBFS table
+          if [ -x "build/cbfstool" ]; then
+            ./build/cbfstool "build/coreboot.rom" print > "${ARTIFACT_DIR}/cbfs_layout.txt"
+            echo "=== CBFS Layout ==="
+            cat "${ARTIFACT_DIR}/cbfs_layout.txt"
+          fi
+          
+          # Checksums
+          cd "${ARTIFACT_DIR}"
+          sha256sum "${TARGET_ROM_NAME}" > "${TARGET_ROM_NAME}.sha256"
+          md5sum "${TARGET_ROM_NAME}" > "${TARGET_ROM_NAME}.md5"
+          cd ..
+          
+          ROM_SIZE=$(stat -c%s "${ARTIFACT_DIR}/${TARGET_ROM_NAME}")
+          SHA256_HASH=$(awk '{print $1}' "${ARTIFACT_DIR}/${TARGET_ROM_NAME}.sha256")
+          
+          echo "ROM_FILE=${TARGET_ROM_NAME}" >> $GITHUB_ENV
+          echo "ROM_SIZE=${ROM_SIZE}" >> $GITHUB_ENV
+          echo "ROM_SHA256=${SHA256_HASH}" >> $GITHUB_ENV
+          echo "ARTIFACT_PATH=${ARTIFACT_DIR}" >> $GITHUB_ENV
+          echo "SAFE_BRANCH=${SAFE_BRANCH}" >> $GITHUB_ENV
+          
+          echo "Successfully generated ${TARGET_ROM_NAME} (Size: ${ROM_SIZE} bytes)"
+
+      - name: Add Step Summary
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ### Build Succeeded: Machinist X99-B9 (${{ matrix.payload-name }} - ${{ matrix.debug-name }})
+          - **Artifact:** \`${{ env.ROM_FILE }}\`
+          - **Payload:** \`${{ matrix.payload }}\`
+          - **Debug / Serial:** \`${{ matrix.debug }}\`
+          - **File Size:** \`${{ env.ROM_SIZE }} bytes\` (16 MiB)
+          - **SHA256 Checksum:** \`${{ env.ROM_SHA256 }}\`
+          EOF
+
+      - name: Upload Firmware ROM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SAFE_BRANCH }}_${{ matrix.payload }}_${{ matrix.debug }}
+          path: ${{ env.ARTIFACT_PATH }}/*
+          retention-days: 14
