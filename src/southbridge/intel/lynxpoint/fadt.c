@@ -37,7 +37,7 @@ void acpi_fill_fadt(acpi_fadt_t *fadt)
 
 	fill_fadt_extended_pm_io(fadt);
 
-	fadt->iapc_boot_arch = ACPI_FADT_LEGACY_DEVICES | ACPI_FADT_8042;
+	fadt->iapc_boot_arch = ACPI_FADT_LEGACY_DEVICES | ACPI_FADT_8042 | ACPI_FADT_NO_ASPM;
 
 	fadt->flags |= ACPI_FADT_WBINVD |
 		       ACPI_FADT_C1_SUPPORTED |

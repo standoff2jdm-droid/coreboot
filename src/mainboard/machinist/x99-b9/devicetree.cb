@@ -34,7 +34,7 @@ chip northbridge/intel/grantley
 			register "sata_port_map" = "0x07"
 
 			device pci 14.0 on end # xHCI Controller
-			device pci 16.0 on end # MEI 1
+			device pci 16.0 off end # MEI 1 (Prevent ME unresponded bus lockup)
 			device pci 1a.0 on end # EHCI 2
 			device pci 1b.0 on end # High Definition Audio
 			device pci 1c.0 on end # PCIe Port 1
