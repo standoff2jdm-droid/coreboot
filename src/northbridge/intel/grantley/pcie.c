@@ -245,6 +245,14 @@ static const char *iio_root_port_acpi_name(const struct device *dev)
 static void iio_root_port_init(struct device *dev)
 {
 	struct device *child = NULL;
+	const unsigned int cap = pci_find_capability(dev, PCI_CAP_ID_PCIE);
+
+	/* Clear ASPM (bits 1:0) on IIO root port to prevent L1 substate latency lockup */
+	if (cap) {
+		u16 lnkctl = pci_read_config16(dev, cap + PCI_EXP_LNKCTL);
+		lnkctl &= ~0x0003;
+		pci_write_config16(dev, cap + PCI_EXP_LNKCTL, lnkctl);
+	}
 
 	while ((child = dev_bus_each_child(dev->downstream, child))) {
 		if (!is_pci(child) || !child->enabled)

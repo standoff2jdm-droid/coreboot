@@ -24,6 +24,9 @@
 #define PCU_RST_CPL3		BIT(3)
 #define PCU_SAPMCTL		0xb0
 #define PCU_SAPM_MPLL_OFF_ENABLE	BIT(1)
+#define PCU_SAPM_IIO_L1_ENABLE		BIT(2)
+#define PCU_SAPM_QPI_L1_ENABLE		BIT(3)
+#define PCU_SAPM_ASPM_MASK		(BIT(1) | BIT(2) | BIT(3))
 #define PCU_SAPM_LOCK		BIT(31)
 #define PCU_MCA_ERR_SRC_LOG	0xec /* Function 2. */
 
@@ -63,8 +66,9 @@ static u8 pcu_mailbox_command(pci_devfn_t pcu, u8 command, u32 *data)
 static void configure_sapm(pci_devfn_t pcu)
 {
 	const u32 before = pci_s_read_config32(pcu, PCU_SAPMCTL);
-	const u32 mask = PCU_SAPM_MPLL_OFF_ENABLE;
-	const u32 desired = before & ~PCU_SAPM_MPLL_OFF_ENABLE;
+	/* Enforce hardware ASPM disable: clear MPLL and IIO/QPI L1 sleep states */
+	const u32 mask = PCU_SAPM_ASPM_MASK;
+	const u32 desired = before & ~PCU_SAPM_ASPM_MASK;
 
 	/* Production Haswell-EP and Broadwell-EP keep the memory PLL on. */
 	if (before == UINT32_MAX)
