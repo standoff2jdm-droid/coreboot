@@ -85,12 +85,15 @@ static void configure_c_states(uint32_t features)
 			msr.lo &= ~CST_IO_MWAIT_REDIRECTION;
 			wrmsr(MSR_PKG_CST_CONFIG_CONTROL, msr);
 		}
+		/* Clamp package C-state limit to C0/C1 to eliminate deep C-state wake latency */
+		msr.lo = (msr.lo & ~0x7) | 0x0;
+		wrmsr(MSR_PKG_CST_CONFIG_CONTROL, msr);
 	}
-	/* Preserve the existing package limit and demotion; do not enable package C6. */
 
 	msr = rdmsr(MSR_POWER_CTL);
 	/* Leave the IMC C2 policy disabled: the memory PLL remains on. */
-	/* Preserve automatic C1E policy; native MWAIT C1E is independent. */
+	/* Disable hardware automatic C1E (bit 1) to eliminate transient FIVR droop during AP wakeups */
+	msr.lo &= ~BIT(1);
 	msr.lo &= ~POWER_CTL_SAPM_IMC_C2_POLICY;
 	/* Expose IA32_ENERGY_PERF_BIAS and its CPUID bit, as on Haswell. */
 	msr.lo |= POWER_CTL_EPB_ENABLE;
@@ -173,7 +176,8 @@ void grantley_configure_package_power_limit(void)
 
 	/* SKU and limit share RAPL units. Preserve the time window, clamp and PL2. */
 	limit.lo &= ~PKG_POWER_LIMIT_MASK;
-	limit.lo |= tdp | PKG_POWER_LIMIT_ENABLE;
+	/* Enforce PL1 clamping (bit 16) alongside TDP limit */
+	limit.lo |= tdp | PKG_POWER_LIMIT_ENABLE | BIT(16);
 	wrmsr(MSR_PKG_POWER_LIMIT, limit);
 	limit = rdmsr(MSR_PKG_POWER_LIMIT);
 	if ((limit.lo & (PKG_POWER_LIMIT_MASK | PKG_POWER_LIMIT_ENABLE)) !=
